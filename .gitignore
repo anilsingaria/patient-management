@@ -1,0 +1,14 @@
+# Build output
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IntelliJ
+.idea/
+*.iml
+
+# Logs and local env
+*.log
+.env
+
+# Spring Initializr leftovers
+HELP.md
