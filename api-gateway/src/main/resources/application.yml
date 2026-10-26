@@ -1,0 +1,40 @@
+server:
+  port: 4004
+
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+
+          ##http://localhost:4004/auth/login
+          ## API-> GATEWAY -> http://auth-service:4005/login
+            - id: auth-service-route
+              uri: http://auth-service:4005
+              predicates:
+                  - Path=/auth/**
+              filters:
+                  - StripPrefix=1
+            # REST client -> http://localhost:4004/api/patients
+            # Gateway     -> http://patient-service:4000/patients
+            - id: patient-service-route
+              uri: http://patient-service:4000
+              predicates:
+                - Path=/api/patients/**
+              filters:
+                - StripPrefix=1
+                - JwtValidation
+
+            # REST client -> http://localhost:4004/api-docs/patients
+            # Gateway     -> http://patient-service:4000/v3/api-docs
+            - id: api-docs-patient-route
+              uri: http://patient-service:4000
+              predicates:
+                - Path=/api-docs/patients
+              filters:
+                - RewritePath=/api-docs/patients,/v3/api-docs
+
+logging:
+  level:
+    org.springframework.cloud.gateway: DEBUG
