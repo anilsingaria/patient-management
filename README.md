@@ -1,6 +1,6 @@
 # Patient Management System
 
-A healthcare backend built as **Spring Boot 4 microservices** and run as **Docker** containers. All client traffic enters through a **Spring Cloud Gateway**, which checks every request's **JWT** with a dedicated auth service before routing it. When a patient is registered, patient-service creates a billing account over **gRPC** in the same request, then publishes a `PatientCreated` event to **Kafka** for an analytics service to consume on its own.
+A healthcare backend built as **Spring Boot 4 microservices** and run as **Docker** containers. All client traffic, including login, enters through a **Spring Cloud Gateway**, which checks every protected request's **JWT** with a dedicated auth service before routing it. When a patient is registered, patient-service creates a billing account over **gRPC** in the same request, then publishes a `PatientCreated` event to **Kafka** for an analytics service to consume on its own. **REST Assured integration tests** verify the whole flow end to end through the gateway, and an **AWS CDK** stack for LocalStack is in progress.
 
 ![Java](https://img.shields.io/badge/Java-21-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
@@ -10,6 +10,8 @@ A healthcare backend built as **Spring Boot 4 microservices** and run as **Docke
 ![Kafka](https://img.shields.io/badge/Apache%20Kafka-KRaft-231F20)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791)
 ![Docker](https://img.shields.io/badge/Docker-containerized-2496ED)
+![REST Assured](https://img.shields.io/badge/Tests-REST%20Assured-green)
+![AWS CDK](https://img.shields.io/badge/AWS%20CDK-LocalStack%20(WIP)-FF9900)
 
 ---
 
@@ -17,20 +19,20 @@ A healthcare backend built as **Spring Boot 4 microservices** and run as **Docke
 
 ```mermaid
 flowchart LR
-    Client([Client / Postman]) -->|REST :4004| GW[api-gateway]
-    GW -->|"GET /validate<br/>(JWT check)"| AUTH[auth-service]
+    Client([Client / Postman /<br/>integration tests]) -->|REST :4004| GW[api-gateway]
+    GW -->|"/auth/** (login)"| AUTH[auth-service]
+    GW -->|"GET /validate<br/>(JWT check)"| AUTH
     AUTH -->|JPA| ADB[(auth DB)]
     GW -->|"/api/patients/**<br/>after valid JWT"| PS[patient-service]
     PS -->|JPA| PDB[(patient DB)]
     PS -->|gRPC :9001<br/>synchronous| BS[billing-service]
     PS -->|PatientCreated event<br/>asynchronous| K[[Kafka<br/>topic: patient]]
     K --> AS[analytics-service]
-    Client -.->|"POST /login :4005<br/>(get a token)"| AUTH
 ```
 
 **Request flow**
 
-1. The client logs in at auth-service (`POST /login`) and receives a signed JWT.
+1. The client logs in through the gateway (`POST /auth/login`), which forwards to auth-service and returns a signed JWT.
 2. Every API call goes to the gateway on port 4004 with `Authorization: Bearer <token>`.
 3. The gateway's `JwtValidation` filter calls auth-service's `/validate`, forwarding the same header. A missing or invalid token gets **401** straight from the gateway.
 4. With a valid token, the gateway strips `/api` and forwards the request to patient-service.
@@ -39,7 +41,7 @@ flowchart LR
 
 | Service | Responsibility | Interface | Port |
 |---|---|---|---|
-| **api-gateway** | Single entry point; routing; JWT validation filter | REST (Spring Cloud Gateway, WebFlux) | 4004 |
+| **api-gateway** | Single entry point; routes `/auth/**`, `/api/patients/**`, `/api-docs/*`; JWT validation filter | REST (Spring Cloud Gateway, WebFlux) | 4004 |
 | **auth-service** | Login, JWT issuing and validation; BCrypt passwords | REST | 4005 |
 | **patient-service** | Patient CRUD, validation, persistence; Kafka producer | REST, gRPC client | 4000 |
 | **billing-service** | Creates billing accounts for new patients | gRPC (Protobuf) | 9001 |
@@ -59,6 +61,8 @@ flowchart LR
 - **Event streaming:** Apache Kafka (KRaft mode, official `apache/kafka` image) with `spring-boot-starter-kafka`; events serialized with Protobuf
 - **Database:** PostgreSQL, one database per service, in Docker; in-memory H2 for local development
 - **API docs:** SpringDoc OpenAPI (Swagger UI)
+- **Testing:** REST Assured 6 and JUnit 6 integration tests against the running stack
+- **Infrastructure as code (WIP):** AWS CDK v2 (Java), targeting LocalStack
 - **Build:** Maven, with `protobuf-maven-plugin` for code generation
 - **Containers:** Docker multi-stage builds on Eclipse Temurin images
 
@@ -74,6 +78,7 @@ flowchart LR
 - **Event-driven analytics.** Patient registration publishes a Protobuf event to Kafka; analytics-service consumes it in its own consumer group, fully decoupled from the producer.
 - **Database per service.** patient-service and auth-service each own a separate PostgreSQL database.
 - **Multi-stage Docker builds** and **container networking** by service name on a shared Docker network.
+- **End-to-end integration tests** that log in and call protected endpoints through the gateway, exactly as a real client would.
 
 ---
 
@@ -177,9 +182,9 @@ Generate a JWT secret in PowerShell with:
 
 ### 5. Try it
 
-**Log in** to get a token (seeded user):
+**Log in through the gateway** to get a token (seeded user):
 ```http
-POST http://localhost:4005/login
+POST http://localhost:4004/auth/login
 Content-Type: application/json
 
 {
@@ -211,16 +216,54 @@ docker logs analytics-service --tail 5
 
 ---
 
+## Integration Tests
+
+The `integration-tests` module tests the running system from the outside, through the gateway on port 4004, using **REST Assured** and **JUnit 6**. Versions are managed by the Spring Boot 4.1 parent POM.
+
+| Test class | What it checks |
+|---|---|
+| `AuthIntegrationTest` | Valid credentials at `/auth/login` return `200` and a JWT; invalid credentials return `401` |
+| `PatientIntegrationTest` | Logs in, then calls `GET /api/patients` with the Bearer token and gets `200` with the patient list |
+
+**Run the tests** (start all containers first):
+```bash
+cd integration-tests
+mvn test
+```
+
+---
+
+## Infrastructure (work in progress)
+
+The `infrastructure` module defines AWS infrastructure as code with **AWS CDK v2 (Java)**, targeting **LocalStack** for local deployment.
+
+**Built so far**
+- VPC across two availability zones
+- RDS PostgreSQL 17 instances for auth-service and patient-service (`db.t3.micro`, 20 GB, credentials generated into Secrets Manager)
+- Route53 TCP health checks for both databases
+
+**Planned**
+- Amazon MSK cluster for Kafka
+- ECS cluster with Cloud Map service discovery
+- Fargate services for each microservice, with the API gateway behind an Application Load Balancer
+
+The stack synthesizes a CloudFormation template to `infrastructure/cdk.out` using `BootstraplessSynthesizer`. Deployment to LocalStack isn't done yet.
+
+---
+
 ## API Reference
 
-### auth-service (port 4005)
+All requests go through the gateway on port **4004**.
+
+### Auth (`/auth/**` → auth-service)
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/login` | Check email and password; returns a signed JWT |
-| `GET` | `/validate` | Validate the `Authorization: Bearer` token; `200` if valid, `401` if not |
+| `POST` | `/auth/login` | Check email and password; returns a signed JWT |
+| `GET` | `/auth/validate` | Validate the `Authorization: Bearer` token; `200` if valid, `401` if not |
+| `GET` | `/api-docs/auth` | auth-service's OpenAPI JSON |
 
-### patient-service (through the gateway, port 4004)
+### Patients (`/api/patients/**` → patient-service)
 
 All routes require `Authorization: Bearer <token>`.
 
@@ -284,10 +327,12 @@ patient-management/
 ├── patient-service/       # REST API, JPA, gRPC client, Kafka producer
 ├── billing-service/       # gRPC server
 ├── analytics-service/     # Kafka consumer
+├── integration-tests/     # REST Assured + JUnit end-to-end tests via the gateway
+├── infrastructure/        # AWS CDK (Java) stack for LocalStack: VPC, RDS, health checks (WIP)
 └── README.md
 ```
 
-Each service has its own `pom.xml`, `src/` and multi-stage `Dockerfile`.
+Each service has its own `pom.xml`, `src/` and multi-stage `Dockerfile`. `integration-tests` and `infrastructure` are Maven modules without Dockerfiles.
 
 ---
 
@@ -302,6 +347,8 @@ Problems solved while building on Spring Boot 4, a newer stack than most tutoria
 - **Authentication failures surfaced as 500 errors.** The JWT filter validated the token but never forwarded the `Authorization` header to auth-service, which answered 400. Forwarding the header and mapping validation errors to 401 fixed both issues.
 - **Version-pinned dependencies** (`spring-kafka 3.x`, SpringDoc 2.x) broke on Spring Boot 4; letting Spring Boot manage versions, or using releases built for it, resolved them.
 - **Moved off deprecated images:** `openjdk` → Eclipse Temurin, and Bitnami Kafka → the official `apache/kafka` image.
+- **Integration test login returned 400.** A missing quote in the JSON text block made the request body invalid JSON, so auth-service rejected it before checking credentials.
+- **CDK couldn't resolve `kafkaVersion`.** Two classes are named `CfnCluster` (ECS and MSK); the MSK one comes from `software.amazon.awscdk.services.msk`.
 
 ---
 
@@ -312,11 +359,11 @@ Problems solved while building on Spring Boot 4, a newer stack than most tutoria
 - [x] **Kafka event streaming** and **analytics-service**
 - [x] **API Gateway** with Spring Cloud Gateway
 - [x] **Auth service** with JWT validation at the gateway
-- [ ] **Auth routes through the gateway** (`/auth/login` on port 4004)
-- [ ] **Integration tests** for login, unauthorized access and patient endpoints
+- [x] **Auth routes through the gateway** (`/auth/login` on port 4004)
+- [x] **Integration tests** for login, unauthorized access and patient endpoints
+- [ ] **AWS deployment:** CDK stack has the VPC, RDS and health checks; MSK, ECS/Fargate, the load balancer and LocalStack deployment are next
 - [ ] **Docker Compose:** start the whole stack with one command
 - [ ] **CI/CD pipeline** with GitHub Actions
-- [ ] **AWS deployment:** infrastructure as code on LocalStack (VPC, RDS, MSK, ECS, load balancer)
 
 ---
 

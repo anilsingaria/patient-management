@@ -12,3 +12,6 @@ target/
 
 # Spring Initializr leftovers
 HELP.md
+
+# AWS CDK synth output
+cdk.out/
